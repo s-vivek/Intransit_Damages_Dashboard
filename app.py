@@ -1,9 +1,8 @@
 """
 In-Transit Damage Dashboard — Streamlit + Google Drive
 Deploy free at streamlit.io/cloud
-Data loads automatically from Google Drive on startup.
 """
-import os, io, warnings
+import io, warnings
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -27,84 +26,59 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-FOLDER_ID = "1gQAobxcPTBDnfmYXsSl9aL_AgrTPBnmo"
+# ── File IDs (Google Drive) ──────────────────────────────────
+FILES = [
+    {"name": "Oct'26",  "id": "1TvJKm-YM-j70SGzv2_BtEC7-zFieIunY"},
+    {"name": "Sep'26",  "id": "1B1qO_kYuOZ3t9FNqYjV531MF1xk3v6B3"},
+    {"name": "Aug'26",  "id": "17E-X7f8_lNzLH-F8am6wmyqmDvqcyg_p"},
+    {"name": "Jul'26",  "id": "1FcrsyIX-mc19JEP2y63mtvfo87etbTzz"},
+]
+
 COLS = ["Box_ID","source_warehouse_id","destination_warehouse",
         "grn_created_at","prod_cms_vertical","prod_cms_brand",
         "NLC","BU","Week","MLEL Tag","Rate Card Vertical"]
 TOP_N = 15
 
-# ── Google Drive helpers ─────────────────────────────────────
-def gdrive_list(folder_id):
-    API = "https://www.googleapis.com/drive/v3/files"
-    files = []
-    queue = [folder_id]
-    while queue:
-        fid = queue.pop()
-        params = {
-            "q": f"'{fid}' in parents and trashed=false",
-            "fields": "files(id,name,mimeType)",
-            "pageSize": 1000,
-        }
-        try:
-            r = requests.get(API, params=params, timeout=30)
-            items = r.json().get("files", [])
-        except Exception:
-            items = []
-        for item in items:
-            if item["mimeType"] == "application/vnd.google-apps.folder":
-                queue.append(item["id"])
-            elif item["name"].endswith((".csv", ".xlsx")):
-                files.append(item)
-    return files
-
-def gdrive_download(file_id):
+# ── Download helper ──────────────────────────────────────────
+def gdrive_download(file_id, name):
     url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
     session = requests.Session()
     r = session.get(url, stream=True, timeout=60)
+    # Handle large file confirmation
     for key, val in r.cookies.items():
         if "download_warning" in key:
-            r = session.get(url, params={"confirm": val}, stream=True, timeout=300)
+            r = session.get(url, params={"confirm": val}, stream=True, timeout=600)
             break
     content = b""
-    for chunk in r.iter_content(chunk_size=1024*1024):
+    total = 0
+    for chunk in r.iter_content(chunk_size=2*1024*1024):
         content += chunk
+        total += len(chunk)
     return content
 
 # ── Load data ────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data():
     status = st.empty()
-    status.info("🔄 Connecting to Google Drive...")
-
-    files = gdrive_list(FOLDER_ID)
-    if not files:
-        st.error("No CSV/XLSX files found. Make sure the Drive folder is shared publicly.")
-        st.stop()
-
-    status.info(f"🔄 Found {len(files)} file(s). Downloading... (may take a few minutes on first load)")
     dfs = []
-    for i, f in enumerate(files, 1):
-        status.info(f"🔄 Downloading {i}/{len(files)}: {f['name']}")
+    for i, f in enumerate(FILES, 1):
+        status.info(f"🔄 Downloading file {i}/{len(FILES)}: {f['name']} — please wait...")
         try:
-            content = gdrive_download(f["id"])
-            ext = os.path.splitext(f["name"])[1].lower()
-            existing_cols = None
-            if ext == ".xlsx":
-                tmp = pd.read_excel(io.BytesIO(content), engine="openpyxl")
-            else:
-                try:
-                    tmp = pd.read_csv(io.BytesIO(content), encoding="utf-8", low_memory=False)
-                except:
-                    tmp = pd.read_csv(io.BytesIO(content), encoding="latin1", low_memory=False)
+            content = gdrive_download(f["id"], f["name"])
+            try:
+                tmp = pd.read_csv(io.BytesIO(content), encoding="utf-8", low_memory=False)
+            except:
+                tmp = pd.read_csv(io.BytesIO(content), encoding="latin1", low_memory=False)
 
             existing = [c for c in COLS if c in tmp.columns]
             if existing:
                 dfs.append(tmp[existing])
+                status.success(f"✅ {f['name']}: {len(tmp):,} rows loaded")
         except Exception as e:
-            st.warning(f"Skipped {f['name']}: {e}")
+            st.warning(f"⚠️ Skipped {f['name']}: {e}")
 
     if not dfs:
-        st.error("No data loaded. Check file format and Drive permissions.")
+        st.error("No data loaded. Check that Drive files are shared publicly (Anyone with link).")
         st.stop()
 
     df = pd.concat(dfs, ignore_index=True)
@@ -130,13 +104,13 @@ def load_data():
             df[c] = df[c].fillna("Unknown").astype(str).str.strip()
 
     status.empty()
-    return df, len(files)
+    return df
 
-DF, n_files = load_data()
+DF = load_data()
 
 # ── Sidebar filters ──────────────────────────────────────────
 st.sidebar.title("🚚 In-Transit Damage")
-st.sidebar.markdown(f"**{n_files} file(s) · {len(DF):,} records**")
+st.sidebar.markdown(f"**{len(FILES)} file(s) · {len(DF):,} records**")
 st.sidebar.markdown("---")
 
 month_opts   = sorted(DF["Month"].dropna().unique().tolist())
@@ -144,24 +118,23 @@ month_labels = {m: DF[DF["Month"]==m]["MonthLabel"].iloc[0] for m in month_opts}
 sel_months   = st.sidebar.multiselect("Month", options=month_opts,
                                       format_func=lambda x: month_labels.get(x, x))
 
-week_opts  = sorted(DF["YearWeek"].dropna().unique().tolist())
-sel_weeks  = st.sidebar.multiselect("Week", week_opts)
+week_opts = sorted(DF["YearWeek"].dropna().unique().tolist())
+sel_weeks = st.sidebar.multiselect("Week", week_opts)
 
 def ms(label, col):
     opts = sorted(DF[col].dropna().unique().tolist())
     return st.sidebar.multiselect(label, opts)
 
-sel_src    = ms("Source WH",         "source_warehouse_id")
-sel_dst    = ms("Dest WH",           "destination_warehouse")
-sel_vert   = ms("Vertical",          "prod_cms_vertical")
-sel_rcvert = ms("Rate Card Vertical","Rate Card Vertical")
-sel_brand  = ms("Brand",             "prod_cms_brand")
-sel_bu     = ms("BU",                "BU")
-sel_mlel   = ms("MLEL Tag",          "MLEL Tag")
+sel_src    = ms("Source WH",          "source_warehouse_id")
+sel_dst    = ms("Dest WH",            "destination_warehouse")
+sel_vert   = ms("Vertical",           "prod_cms_vertical")
+sel_rcvert = ms("Rate Card Vertical", "Rate Card Vertical")
+sel_brand  = ms("Brand",              "prod_cms_brand")
+sel_bu     = ms("BU",                 "BU")
+sel_mlel   = ms("MLEL Tag",           "MLEL Tag")
 
 st.sidebar.markdown("---")
-do_reset = st.sidebar.button("✕ Reset All", use_container_width=True)
-if do_reset:
+if st.sidebar.button("✕ Reset All", use_container_width=True):
     st.rerun()
 
 # ── Filter ───────────────────────────────────────────────────
@@ -187,7 +160,7 @@ df = filter_df(
 
 # ── Header ───────────────────────────────────────────────────
 st.title("🚚 In-Transit Damage Dashboard")
-st.caption(f"{n_files} file(s) · {len(df):,} records shown")
+st.caption(f"{len(FILES)} file(s) · {len(df):,} records shown")
 
 # ── KPIs ─────────────────────────────────────────────────────
 total_boxes = int(df["Box_ID"].nunique()) if "Box_ID" in df.columns else 0
@@ -202,11 +175,11 @@ def kpi(col, label, value, color):
       <div style="font-size:18px;font-weight:700;color:{color}">{value}</div>
     </div>""", unsafe_allow_html=True)
 
-kpi(k1, "Total Boxes",   f"{total_boxes:,}",                              "#1C2833")
-kpi(k2, "Total NLC",     f"Rs.{total_nlc:,.0f}",                         "#E74C3C")
-kpi(k3, "Avg NLC/Box",   f"Rs.{avg_nlc:,.2f}",                           "#E67E22")
-kpi(k4, "Source WHs",    f"{df['source_warehouse_id'].nunique():,}",      "#2980B9")
-kpi(k5, "Dest WHs",      f"{df['destination_warehouse'].nunique():,}",    "#1ABC9C")
+kpi(k1, "Total Boxes",  f"{total_boxes:,}",           "#1C2833")
+kpi(k2, "Total NLC",    f"Rs.{total_nlc:,.0f}",       "#E74C3C")
+kpi(k3, "Avg NLC/Box",  f"Rs.{avg_nlc:,.2f}",         "#E67E22")
+kpi(k4, "Source WHs",   f"{df['source_warehouse_id'].nunique():,}", "#2980B9")
+kpi(k5, "Dest WHs",     f"{df['destination_warehouse'].nunique():,}","#1ABC9C")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -214,29 +187,18 @@ st.markdown("<br>", unsafe_allow_html=True)
 LAYOUT = dict(plot_bgcolor="#FAFAFA", paper_bgcolor="#fff",
               font=dict(family="Arial", size=11), showlegend=False)
 
-def hbar_nlc(col, title, color, n=TOP_N):
+def hbar(col, title, color, n=TOP_N):
     t = df.groupby(col)["NLC"].sum().nlargest(n).reset_index().sort_values("NLC")
     if t.empty: return go.Figure()
     fig = px.bar(t, x="NLC", y=col, orientation="h", title=title,
                  text=t["NLC"].apply(lambda v: f"Rs.{v:,.0f}"),
                  color_discrete_sequence=[color])
     fig.update_traces(textposition="outside")
-    fig.update_layout(**LAYOUT, margin=dict(l=10,r=80,t=40,b=10),
+    fig.update_layout(**LAYOUT, margin=dict(l=10,r=90,t=40,b=10),
                       yaxis_title="", xaxis_title="NLC (Rs.)")
     return fig
 
-def vbar_nlc(grp_col, sort_col, title, color):
-    t = df.groupby([sort_col, grp_col])["NLC"].sum().reset_index().sort_values(sort_col)
-    if t.empty: return go.Figure()
-    fig = px.bar(t, x=grp_col, y="NLC", title=title,
-                 text=t["NLC"].apply(lambda v: f"Rs.{v:,.0f}"),
-                 color_discrete_sequence=[color])
-    fig.update_traces(textposition="outside")
-    fig.update_layout(**LAYOUT, xaxis_title="", yaxis_title="NLC (Rs.)",
-                      xaxis_tickangle=-45, margin=dict(t=40,b=80))
-    return fig
-
-def pie_chart(col, title, n=15):
+def pie_nlc(col, title, n=20):
     t = df.groupby(col)["NLC"].sum().nlargest(n).reset_index()
     if t.empty: return go.Figure()
     fig = px.pie(t, names=col, values="NLC", title=title, hole=0.4,
@@ -275,21 +237,21 @@ c2.plotly_chart(fig, use_container_width=True)
 # ── Warehouse View ────────────────────────────────────────────
 st.subheader("🏭 Warehouse View")
 c1, c2 = st.columns(2)
-c1.plotly_chart(hbar_nlc("source_warehouse_id",  "Source WH by NLC", "#E74C3C"), use_container_width=True)
-c2.plotly_chart(hbar_nlc("destination_warehouse","Dest WH by NLC",   "#E67E22"), use_container_width=True)
+c1.plotly_chart(hbar("source_warehouse_id",   "Source WH by NLC", "#E74C3C"), use_container_width=True)
+c2.plotly_chart(hbar("destination_warehouse", "Dest WH by NLC",   "#E67E22"), use_container_width=True)
 
 # ── Product View ───────────────────────────────────────────────
 st.subheader("📦 Product View")
 c1, c2 = st.columns(2)
-c1.plotly_chart(hbar_nlc("prod_cms_vertical", "Product Vertical by NLC",    "#3498DB"), use_container_width=True)
-c2.plotly_chart(hbar_nlc("Rate Card Vertical","Rate Card Vertical by NLC",  "#F39C12"), use_container_width=True)
+c1.plotly_chart(hbar("prod_cms_vertical",  "Product Vertical by NLC",   "#3498DB"), use_container_width=True)
+c2.plotly_chart(hbar("Rate Card Vertical", "Rate Card Vertical by NLC", "#F39C12"), use_container_width=True)
 
 c1, c2 = st.columns(2)
-c1.plotly_chart(hbar_nlc("prod_cms_brand", "Brand by NLC", "#8E44AD"), use_container_width=True)
-c2.plotly_chart(hbar_nlc("BU",             "BU by NLC",    "#1ABC9C"), use_container_width=True)
+c1.plotly_chart(hbar("prod_cms_brand", "Brand by NLC", "#8E44AD"), use_container_width=True)
+c2.plotly_chart(hbar("BU",             "BU by NLC",    "#1ABC9C"), use_container_width=True)
 
 # ── MLEL Split ────────────────────────────────────────────────
 st.subheader("🏷️ MLEL Split")
-st.plotly_chart(pie_chart("MLEL Tag", "MLEL Tag Split", 50), use_container_width=True)
+st.plotly_chart(pie_nlc("MLEL Tag", "MLEL Tag Split", 50), use_container_width=True)
 
 st.caption(f"In-Transit Damage Dashboard · Streamlit Cloud · {len(df):,} records")
