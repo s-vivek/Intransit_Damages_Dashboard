@@ -66,9 +66,9 @@ def load_data():
         try:
             content = gdrive_download(f["id"], f["name"])
             try:
-                tmp = pd.read_csv(io.BytesIO(content), encoding="utf-8", low_memory=False)
+                tmp = pd.read_csv(io.BytesIO(content), encoding="utf-8", low_memory=False, on_bad_lines="skip")
             except:
-                tmp = pd.read_csv(io.BytesIO(content), encoding="latin1", low_memory=False)
+                tmp = pd.read_csv(io.BytesIO(content), encoding="latin1", low_memory=False, on_bad_lines="skip")
 
             existing = [c for c in COLS if c in tmp.columns]
             if existing:
